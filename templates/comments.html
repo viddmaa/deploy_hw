@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Комментарии</title>
+</head>
+<body>
+    <h1>Комментарии</h1>
+
+    <form action="/comments" method="post">
+        <textarea name="text" rows="4" cols="50" placeholder="Введите комментарий"></textarea>
+        <br>
+        <button type="submit">Отправить</button>
+    </form>
+
+    <hr>
+
+    {% for comment in comments %}
+        <div>{{ comment | safe }}</div>
+        <hr>
+    {% endfor %}
+</body>
+</html>
