@@ -1,13 +1,19 @@
+import os
 import uuid
+from io import BytesIO
 from pathlib import Path
 
 import bleach
 import filetype
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from cryptography.fernet import Fernet, InvalidToken
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from dotenv import load_dotenv
 
 from src.schemas import UserCreate
+
+load_dotenv()
 
 app = FastAPI(title="Corporate File Manager API")
 templates = Jinja2Templates(directory="templates")
@@ -29,8 +35,14 @@ files_db = [
 STORAGE_DIR = Path("storage")
 STORAGE_DIR.mkdir(exist_ok=True)
 
-MAX_FILE_SIZE = 2 * 1024 * 1024  # 2 MB
-ALLOWED_MIME_TYPES = {"image/jpeg", "image/png"}
+MAX_FILE_SIZE = 2 * 1024 * 1024
+ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "text/plain"}
+
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+if not ENCRYPTION_KEY:
+    raise RuntimeError("ENCRYPTION_KEY is not set in .env")
+
+cipher = Fernet(ENCRYPTION_KEY.encode())
 
 
 def clean_comment(text: str) -> str:
@@ -124,6 +136,11 @@ def delete_file(
     if user["role"] != "admin" and file["owner"] != user["username"]:
         raise HTTPException(status_code=404, detail="File not found")
 
+    if "path" in file:
+        file_path = Path(file["path"])
+        if file_path.exists():
+            file_path.unlink()
+
     files_db.remove(file)
     return {"msg": "File deleted", "file_id": file["id"]}
 
@@ -131,38 +148,55 @@ def delete_file(
 @app.post("/files/upload")
 async def upload_file(
     file: UploadFile = File(...),
+    encrypt: bool = Query(False),
     user: dict = Depends(get_current_user),
 ) -> dict:
     head = await file.read(2048)
     kind = filetype.guess(head)
 
-    if kind is None or kind.mime not in ALLOWED_MIME_TYPES:
-        raise HTTPException(status_code=400, detail="Only JPEG and PNG files are allowed")
+    allowed_text = file.content_type == "text/plain" and file.filename.endswith(".txt")
+
+    if (kind is None or kind.mime not in ALLOWED_MIME_TYPES) and not allowed_text:
+        raise HTTPException(status_code=400, detail="Only JPEG, PNG and TXT files are allowed")
 
     await file.seek(0)
 
-    file_ext = ".jpg" if kind.mime == "image/jpeg" else ".png"
+    if kind is not None:
+        if kind.mime == "image/jpeg":
+            file_ext = ".jpg"
+        elif kind.mime == "image/png":
+            file_ext = ".png"
+        else:
+            file_ext = ".bin"
+    else:
+        file_ext = ".txt"
+
     physical_name = f"{uuid.uuid4()}{file_ext}"
     file_path = STORAGE_DIR / physical_name
 
     total_size = 0
+    chunks: list[bytes] = []
 
     try:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+
+            total_size += len(chunk)
+
+            if total_size > MAX_FILE_SIZE:
+                raise HTTPException(status_code=413, detail="File is too large")
+
+            chunks.append(chunk)
+
+        file_data = b"".join(chunks)
+
+        if encrypt:
+            file_data = cipher.encrypt(file_data)
+
         with open(file_path, "wb") as buffer:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-
-                total_size += len(chunk)
-
-                if total_size > MAX_FILE_SIZE:
-                    buffer.close()
-                    if file_path.exists():
-                        file_path.unlink()
-                    raise HTTPException(status_code=413, detail="File is too large")
-
-                buffer.write(chunk)
+            buffer.write(file_data)
 
         new_file = {
             "id": max((f["id"] for f in files_db), default=0) + 1,
@@ -171,6 +205,7 @@ async def upload_file(
             "owner": user["username"],
             "size": total_size,
             "path": str(file_path),
+            "is_encrypted": encrypt,
         }
         files_db.append(new_file)
 
@@ -180,6 +215,7 @@ async def upload_file(
             "original_name": new_file["original_name"],
             "stored_as": physical_name,
             "size": total_size,
+            "is_encrypted": encrypt,
         }
 
     finally:
@@ -195,6 +231,21 @@ def download_file(file: dict = Depends(check_file_permissions)):
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found on disk")
+
+    if file.get("is_encrypted", False):
+        encrypted_data = file_path.read_bytes()
+        try:
+            decrypted_data = cipher.decrypt(encrypted_data)
+        except InvalidToken:
+            raise HTTPException(status_code=500, detail="Invalid encryption key")
+
+        return StreamingResponse(
+            BytesIO(decrypted_data),
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{file["original_name"]}"'
+            },
+        )
 
     return FileResponse(
         path=file_path,
