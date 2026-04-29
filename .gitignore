@@ -2,3 +2,8 @@
 .venv/
 venv/
 __pycache__/
+storage/
+fake.jpg
+cat.jpg
+cat_old.jpg
+secret.txt

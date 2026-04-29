@@ -1,0 +1,11 @@
+.venv
+__pycache__
+.git
+.gitignore
+storage
+Screens
+reports
+*.pyc
+.env
+*.md
+reports/
