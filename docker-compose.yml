@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    container_name: file_manager_app
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./storage:/app/storage
+    env_file:
+      - .env
+    restart: unless-stopped
